@@ -1,0 +1,865 @@
+BEGIN;
+
+CREATE SCHEMA IF NOT EXISTS agro_directo;
+
+-- =========================================================
+-- FUNCIONES GENERALES
+-- =========================================================
+CREATE OR REPLACE FUNCTION agro_directo.set_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = CURRENT_TIMESTAMP;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- =========================================================
+-- TABLAS MAESTRAS
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.roles (
+    id              BIGSERIAL PRIMARY KEY,
+    code            VARCHAR(30) NOT NULL UNIQUE,
+    name            VARCHAR(60) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.permissions (
+    id              BIGSERIAL PRIMARY KEY,
+    code            VARCHAR(80) NOT NULL UNIQUE,
+    name            VARCHAR(120) NOT NULL,
+    description     TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.role_permissions (
+    id              BIGSERIAL PRIMARY KEY,
+    role_id         BIGINT NOT NULL REFERENCES agro_directo.roles(id) ON DELETE CASCADE,
+    permission_id   BIGINT NOT NULL REFERENCES agro_directo.permissions(id) ON DELETE CASCADE,
+    assigned_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_role_permission UNIQUE (role_id, permission_id)
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.user_statuses (
+    id              BIGSERIAL PRIMARY KEY,
+    code            VARCHAR(40) NOT NULL UNIQUE,
+    name            VARCHAR(80) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.document_types (
+    id              BIGSERIAL PRIMARY KEY,
+    code            VARCHAR(40) NOT NULL UNIQUE,
+    name            VARCHAR(100) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.product_units (
+    id              BIGSERIAL PRIMARY KEY,
+    code            VARCHAR(20) NOT NULL UNIQUE,
+    name            VARCHAR(40) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.product_statuses (
+    id              BIGSERIAL PRIMARY KEY,
+    code            VARCHAR(30) NOT NULL UNIQUE,
+    name            VARCHAR(60) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.order_statuses (
+    id              BIGSERIAL PRIMARY KEY,
+    code            VARCHAR(30) NOT NULL UNIQUE,
+    name            VARCHAR(60) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.payment_statuses (
+    id              BIGSERIAL PRIMARY KEY,
+    code            VARCHAR(30) NOT NULL UNIQUE,
+    name            VARCHAR(60) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.shipment_statuses (
+    id              BIGSERIAL PRIMARY KEY,
+    code            VARCHAR(30) NOT NULL UNIQUE,
+    name            VARCHAR(60) NOT NULL
+);
+
+-- =========================================================
+-- USUARIOS E IDENTIDAD
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.users (
+    id                          BIGSERIAL PRIMARY KEY,
+    full_name                   VARCHAR(150) NOT NULL,
+    email                       VARCHAR(150) NOT NULL UNIQUE,
+    password_hash               TEXT NOT NULL,
+    phone                       VARCHAR(30) NOT NULL,
+    status_id                   BIGINT NOT NULL REFERENCES agro_directo.user_statuses(id),
+    accepted_terms              BOOLEAN NOT NULL DEFAULT FALSE,
+    accepted_privacy_policy     BOOLEAN NOT NULL DEFAULT FALSE,
+
+    email_verified              BOOLEAN NOT NULL DEFAULT FALSE,
+    phone_verified              BOOLEAN NOT NULL DEFAULT FALSE,
+    failed_login_attempts       INTEGER NOT NULL DEFAULT 0 CHECK (failed_login_attempts >= 0),
+    locked_until                TIMESTAMP,
+    last_login_at               TIMESTAMP,
+    password_changed_at         TIMESTAMP,
+
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by_user_id          BIGINT REFERENCES agro_directo.users(id),
+    updated_by_user_id          BIGINT REFERENCES agro_directo.users(id)
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.user_roles (
+    id              BIGSERIAL PRIMARY KEY,
+    user_id         BIGINT NOT NULL REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    role_id         BIGINT NOT NULL REFERENCES agro_directo.roles(id),
+    is_primary      BOOLEAN NOT NULL DEFAULT FALSE,
+    assigned_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_user_role UNIQUE (user_id, role_id)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_user_primary_role
+ON agro_directo.user_roles(user_id)
+WHERE is_primary = TRUE;
+
+CREATE TABLE IF NOT EXISTS agro_directo.refresh_tokens (
+    id              BIGSERIAL PRIMARY KEY,
+    user_id         BIGINT NOT NULL REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    token_hash      TEXT NOT NULL UNIQUE,
+    issued_at       TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at      TIMESTAMP NOT NULL,
+    revoked_at      TIMESTAMP,
+    replaced_by_id  BIGINT REFERENCES agro_directo.refresh_tokens(id),
+    user_agent      TEXT,
+    ip_address      VARCHAR(45),
+    CONSTRAINT chk_refresh_token_dates
+        CHECK (expires_at > issued_at),
+    CONSTRAINT chk_refresh_token_revoked
+        CHECK (revoked_at IS NULL OR revoked_at >= issued_at)
+);
+
+-- =========================================================
+-- PERFILES POR ROL
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.producer_profiles (
+    user_id                      BIGINT PRIMARY KEY REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    producer_type                VARCHAR(30) NOT NULL CHECK (producer_type IN ('INDIVIDUAL', 'ASSOCIATION', 'COOPERATIVE')),
+    farm_name                    VARCHAR(150) NOT NULL,
+    municipality                 VARCHAR(100) NOT NULL,
+    province                     VARCHAR(100) NOT NULL,
+    department                   VARCHAR(100) NOT NULL,
+    experience_years             INTEGER NOT NULL CHECK (experience_years >= 0),
+    geo_latitude                 NUMERIC(10,7),
+    geo_longitude                NUMERIC(10,7),
+    geolocation_completed        BOOLEAN NOT NULL DEFAULT FALSE,
+    trust_score                  NUMERIC(3,2) CHECK (trust_score IS NULL OR (trust_score >= 0 AND trust_score <= 5)),
+
+    created_at                   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by_user_id           BIGINT REFERENCES agro_directo.users(id),
+    updated_by_user_id           BIGINT REFERENCES agro_directo.users(id),
+
+    CONSTRAINT chk_producer_geo_pair
+        CHECK (
+            (geo_latitude IS NULL AND geo_longitude IS NULL)
+            OR
+            (geo_latitude IS NOT NULL AND geo_longitude IS NOT NULL)
+        ),
+    CONSTRAINT chk_producer_lat_range
+        CHECK (geo_latitude IS NULL OR (geo_latitude >= -90 AND geo_latitude <= 90)),
+    CONSTRAINT chk_producer_lon_range
+        CHECK (geo_longitude IS NULL OR (geo_longitude >= -180 AND geo_longitude <= 180))
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.buyer_profiles (
+    user_id                      BIGINT PRIMARY KEY REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    buyer_type                   VARCHAR(30) NOT NULL CHECK (buyer_type IN ('INDIVIDUAL', 'BUSINESS', 'COMPANY')),
+    business_name                VARCHAR(150),
+    city_or_purchase_zone        VARCHAR(150) NOT NULL,
+
+    created_at                   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by_user_id           BIGINT REFERENCES agro_directo.users(id),
+    updated_by_user_id           BIGINT REFERENCES agro_directo.users(id)
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.carrier_profiles (
+    user_id                      BIGINT PRIMARY KEY REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    transport_type               VARCHAR(30) NOT NULL CHECK (transport_type IN ('TRUCK', 'PICKUP', 'MOTORBIKE', 'OTHER')),
+    load_capacity_kg             NUMERIC(12,2) NOT NULL CHECK (load_capacity_kg > 0),
+    operation_zone               VARCHAR(50) NOT NULL CHECK (operation_zone IN ('LOCAL', 'REGIONAL', 'DEPARTMENTAL')),
+    driver_license_number        VARCHAR(50) NOT NULL,
+    vehicle_plate                VARCHAR(20) NOT NULL,
+
+    created_at                   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by_user_id           BIGINT REFERENCES agro_directo.users(id),
+    updated_by_user_id           BIGINT REFERENCES agro_directo.users(id),
+
+    CONSTRAINT uq_carrier_license UNIQUE (driver_license_number),
+    CONSTRAINT uq_carrier_plate UNIQUE (vehicle_plate)
+);
+
+-- =========================================================
+-- DOCUMENTOS Y VERIFICACIÓN
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.verification_documents (
+    id                          BIGSERIAL PRIMARY KEY,
+    user_id                     BIGINT NOT NULL REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    document_type_id            BIGINT NOT NULL REFERENCES agro_directo.document_types(id),
+    document_number             VARCHAR(80),
+    file_url                    TEXT NOT NULL,
+    original_filename           VARCHAR(255),
+    mime_type                   VARCHAR(100),
+    uploaded_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.verification_reviews (
+    id                          BIGSERIAL PRIMARY KEY,
+    document_id                 BIGINT NOT NULL REFERENCES agro_directo.verification_documents(id) ON DELETE CASCADE,
+    reviewed_by_user_id         BIGINT NOT NULL REFERENCES agro_directo.users(id),
+    decision                    VARCHAR(20) NOT NULL CHECK (decision IN ('APPROVED', 'REJECTED')),
+    reason                      TEXT,
+    evidence_url                TEXT,
+    reviewed_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================================
+-- PRODUCTOS / PUBLICACIONES
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.products (
+    id                          BIGSERIAL PRIMARY KEY,
+    producer_user_id            BIGINT NOT NULL REFERENCES agro_directo.users(id),
+    name                        VARCHAR(150) NOT NULL,
+    description                 TEXT,
+    unit_id                     BIGINT NOT NULL REFERENCES agro_directo.product_units(id),
+    available_quantity          NUMERIC(12,2) NOT NULL CHECK (available_quantity >= 0),
+    unit_price                  NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
+    is_pre_sale                 BOOLEAN NOT NULL DEFAULT FALSE,
+    estimated_available_date    DATE,
+    harvest_available_date      DATE,
+    status_id                   BIGINT NOT NULL REFERENCES agro_directo.product_statuses(id),
+
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by_user_id          BIGINT REFERENCES agro_directo.users(id),
+    updated_by_user_id          BIGINT REFERENCES agro_directo.users(id),
+
+    CONSTRAINT chk_products_presale_date
+        CHECK (
+            (is_pre_sale = FALSE)
+            OR
+            (is_pre_sale = TRUE AND estimated_available_date IS NOT NULL)
+        )
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.product_images (
+    id                          BIGSERIAL PRIMARY KEY,
+    product_id                  BIGINT NOT NULL REFERENCES agro_directo.products(id) ON DELETE CASCADE,
+    image_url                   TEXT NOT NULL,
+    sort_order                  INTEGER NOT NULL DEFAULT 0,
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.market_reference_prices (
+    id                          BIGSERIAL PRIMARY KEY,
+    product_name                VARCHAR(150) NOT NULL,
+    market_name                 VARCHAR(120) NOT NULL DEFAULT 'Mercado Abasto',
+    reference_unit              VARCHAR(40) NOT NULL,
+    reference_price             NUMERIC(12,2) NOT NULL CHECK (reference_price >= 0),
+    observed_on                 DATE NOT NULL,
+    source_note                 TEXT,
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.seasonal_alert_subscriptions (
+    id                          BIGSERIAL PRIMARY KEY,
+    buyer_user_id               BIGINT NOT NULL REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    product_name                VARCHAR(150) NOT NULL,
+    is_active                   BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_buyer_product_alert UNIQUE (buyer_user_id, product_name)
+);
+
+-- =========================================================
+-- CARRITO
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.carts (
+    id                          BIGSERIAL PRIMARY KEY,
+    buyer_user_id               BIGINT NOT NULL REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    status                      VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ABANDONED', 'CONVERTED')),
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.cart_items (
+    id                          BIGSERIAL PRIMARY KEY,
+    cart_id                     BIGINT NOT NULL REFERENCES agro_directo.carts(id) ON DELETE CASCADE,
+    product_id                  BIGINT NOT NULL REFERENCES agro_directo.products(id),
+    quantity                    NUMERIC(12,2) NOT NULL CHECK (quantity > 0),
+    unit_price_snapshot         NUMERIC(12,2) NOT NULL CHECK (unit_price_snapshot >= 0),
+    added_at                    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_cart_product UNIQUE (cart_id, product_id)
+);
+
+-- =========================================================
+-- PEDIDOS
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.orders (
+    id                          BIGSERIAL PRIMARY KEY,
+    buyer_user_id               BIGINT NOT NULL REFERENCES agro_directo.users(id),
+    status_id                   BIGINT NOT NULL REFERENCES agro_directo.order_statuses(id),
+    total_amount                NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (total_amount >= 0),
+    delivery_address            TEXT,
+    delivery_zone               VARCHAR(150),
+    notes                       TEXT,
+
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by_user_id          BIGINT REFERENCES agro_directo.users(id),
+    updated_by_user_id          BIGINT REFERENCES agro_directo.users(id)
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.order_items (
+    id                          BIGSERIAL PRIMARY KEY,
+    order_id                    BIGINT NOT NULL REFERENCES agro_directo.orders(id) ON DELETE CASCADE,
+    product_id                  BIGINT NOT NULL REFERENCES agro_directo.products(id),
+    producer_user_id            BIGINT NOT NULL REFERENCES agro_directo.users(id),
+    quantity                    NUMERIC(12,2) NOT NULL CHECK (quantity > 0),
+    unit_price                  NUMERIC(12,2) NOT NULL CHECK (unit_price >= 0),
+    subtotal                    NUMERIC(14,2) NOT NULL CHECK (subtotal >= 0),
+    confirmation_status         VARCHAR(30) NOT NULL DEFAULT 'PENDING'
+                                CHECK (confirmation_status IN ('PENDING', 'CONFIRMED', 'REJECTED')),
+    confirmed_at                TIMESTAMP,
+    CONSTRAINT uq_order_product UNIQUE (order_id, product_id)
+);
+
+-- =========================================================
+-- PAGOS
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.payments (
+    id                          BIGSERIAL PRIMARY KEY,
+    order_id                    BIGINT NOT NULL UNIQUE REFERENCES agro_directo.orders(id) ON DELETE CASCADE,
+    status_id                   BIGINT NOT NULL REFERENCES agro_directo.payment_statuses(id),
+    payment_method              VARCHAR(30) NOT NULL CHECK (payment_method IN ('QR_TRANSFER')),
+    amount                      NUMERIC(14,2) NOT NULL CHECK (amount >= 0),
+
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by_user_id          BIGINT REFERENCES agro_directo.users(id),
+    updated_by_user_id          BIGINT REFERENCES agro_directo.users(id)
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.payment_qr (
+    id                          BIGSERIAL PRIMARY KEY,
+    payment_id                  BIGINT NOT NULL UNIQUE REFERENCES agro_directo.payments(id) ON DELETE CASCADE,
+    qr_code_text                TEXT NOT NULL,
+    qr_image_url                TEXT,
+    generated_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at                  TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.payment_receipts (
+    id                          BIGSERIAL PRIMARY KEY,
+    payment_id                  BIGINT NOT NULL REFERENCES agro_directo.payments(id) ON DELETE CASCADE,
+    uploaded_by_user_id         BIGINT NOT NULL REFERENCES agro_directo.users(id),
+    file_url                    TEXT NOT NULL,
+    original_filename           VARCHAR(255),
+    uploaded_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    verified_by_user_id         BIGINT REFERENCES agro_directo.users(id),
+    verification_result         VARCHAR(20) CHECK (verification_result IN ('APPROVED', 'REJECTED')),
+    verification_note           TEXT,
+    verified_at                 TIMESTAMP
+);
+
+-- =========================================================
+-- LOGÍSTICA Y ENTREGA
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.shipments (
+    id                          BIGSERIAL PRIMARY KEY,
+    order_id                    BIGINT NOT NULL REFERENCES agro_directo.orders(id) ON DELETE CASCADE,
+    producer_user_id            BIGINT NOT NULL REFERENCES agro_directo.users(id),
+    buyer_user_id               BIGINT NOT NULL REFERENCES agro_directo.users(id),
+    status_id                   BIGINT NOT NULL REFERENCES agro_directo.shipment_statuses(id),
+    pickup_latitude             NUMERIC(10,7),
+    pickup_longitude            NUMERIC(10,7),
+    delivery_latitude           NUMERIC(10,7),
+    delivery_longitude          NUMERIC(10,7),
+    route_url                   TEXT,
+
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by_user_id          BIGINT REFERENCES agro_directo.users(id),
+    updated_by_user_id          BIGINT REFERENCES agro_directo.users(id),
+
+    CONSTRAINT chk_ship_pickup_pair
+        CHECK (
+            (pickup_latitude IS NULL AND pickup_longitude IS NULL)
+            OR
+            (pickup_latitude IS NOT NULL AND pickup_longitude IS NOT NULL)
+        ),
+    CONSTRAINT chk_ship_delivery_pair
+        CHECK (
+            (delivery_latitude IS NULL AND delivery_longitude IS NULL)
+            OR
+            (delivery_latitude IS NOT NULL AND delivery_longitude IS NOT NULL)
+        ),
+    CONSTRAINT chk_ship_pickup_lat_range
+        CHECK (pickup_latitude IS NULL OR (pickup_latitude >= -90 AND pickup_latitude <= 90)),
+    CONSTRAINT chk_ship_pickup_lon_range
+        CHECK (pickup_longitude IS NULL OR (pickup_longitude >= -180 AND pickup_longitude <= 180)),
+    CONSTRAINT chk_ship_delivery_lat_range
+        CHECK (delivery_latitude IS NULL OR (delivery_latitude >= -90 AND delivery_latitude <= 90)),
+    CONSTRAINT chk_ship_delivery_lon_range
+        CHECK (delivery_longitude IS NULL OR (delivery_longitude >= -180 AND delivery_longitude <= 180))
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.shipment_items (
+    id                          BIGSERIAL PRIMARY KEY,
+    shipment_id                 BIGINT NOT NULL REFERENCES agro_directo.shipments(id) ON DELETE CASCADE,
+    order_item_id               BIGINT NOT NULL UNIQUE REFERENCES agro_directo.order_items(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.shipment_applications (
+    id                          BIGSERIAL PRIMARY KEY,
+    shipment_id                 BIGINT NOT NULL REFERENCES agro_directo.shipments(id) ON DELETE CASCADE,
+    carrier_user_id             BIGINT NOT NULL REFERENCES agro_directo.users(id),
+    application_status          VARCHAR(20) NOT NULL DEFAULT 'APPLIED'
+                                CHECK (application_status IN ('APPLIED', 'ACCEPTED', 'REJECTED')),
+    applied_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_shipment_carrier_application UNIQUE (shipment_id, carrier_user_id)
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.shipment_assignments (
+    id                          BIGSERIAL PRIMARY KEY,
+    shipment_id                 BIGINT NOT NULL UNIQUE REFERENCES agro_directo.shipments(id) ON DELETE CASCADE,
+    carrier_user_id             BIGINT NOT NULL REFERENCES agro_directo.users(id),
+    assigned_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.delivery_confirmations (
+    id                          BIGSERIAL PRIMARY KEY,
+    shipment_id                 BIGINT NOT NULL UNIQUE REFERENCES agro_directo.shipments(id) ON DELETE CASCADE,
+    confirmed_by_buyer_user_id  BIGINT NOT NULL REFERENCES agro_directo.users(id),
+    received_at                 TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    notes                       TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agro_directo.signed_receipts (
+    id                          BIGSERIAL PRIMARY KEY,
+    shipment_id                 BIGINT NOT NULL UNIQUE REFERENCES agro_directo.shipments(id) ON DELETE CASCADE,
+    signed_by_name              VARCHAR(150) NOT NULL,
+    signature_image_url         TEXT NOT NULL,
+    signed_at                   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================================
+-- CALIFICACIONES / CONFIANZA
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.producer_ratings (
+    id                          BIGSERIAL PRIMARY KEY,
+    producer_user_id            BIGINT NOT NULL REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    buyer_user_id               BIGINT NOT NULL REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    order_id                    BIGINT NOT NULL REFERENCES agro_directo.orders(id) ON DELETE CASCADE,
+    score                       INTEGER NOT NULL CHECK (score BETWEEN 1 AND 5),
+    comment                     TEXT,
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_rating_order UNIQUE (producer_user_id, buyer_user_id, order_id)
+);
+
+-- =========================================================
+-- NOTIFICACIONES
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.notifications (
+    id                          BIGSERIAL PRIMARY KEY,
+    user_id                     BIGINT NOT NULL REFERENCES agro_directo.users(id) ON DELETE CASCADE,
+    type                        VARCHAR(50) NOT NULL,
+    title                       VARCHAR(150) NOT NULL,
+    message                     TEXT NOT NULL,
+    is_read                     BOOLEAN NOT NULL DEFAULT FALSE,
+    payload_json                JSONB,
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================================
+-- AUDITORÍA
+-- =========================================================
+CREATE TABLE IF NOT EXISTS agro_directo.audit_log (
+    id                          BIGSERIAL PRIMARY KEY,
+    actor_user_id               BIGINT REFERENCES agro_directo.users(id),
+    entity_name                 VARCHAR(100) NOT NULL,
+    entity_id                   BIGINT NOT NULL,
+    action                      VARCHAR(50) NOT NULL,
+    old_values                  JSONB,
+    new_values                  JSONB,
+    ip_address                  VARCHAR(45),
+    user_agent                  TEXT,
+    created_at                  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- =========================================================
+-- ÍNDICES
+-- =========================================================
+CREATE INDEX IF NOT EXISTS idx_users_email
+    ON agro_directo.users(email);
+
+CREATE INDEX IF NOT EXISTS idx_users_status
+    ON agro_directo.users(status_id);
+
+CREATE INDEX IF NOT EXISTS idx_users_email_status
+    ON agro_directo.users(email, status_id);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user
+    ON agro_directo.refresh_tokens(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_refresh_tokens_expires_at
+    ON agro_directo.refresh_tokens(expires_at);
+
+CREATE INDEX IF NOT EXISTS idx_role_permissions_role
+    ON agro_directo.role_permissions(role_id);
+
+CREATE INDEX IF NOT EXISTS idx_role_permissions_permission
+    ON agro_directo.role_permissions(permission_id);
+
+CREATE INDEX IF NOT EXISTS idx_products_producer
+    ON agro_directo.products(producer_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_products_status
+    ON agro_directo.products(status_id);
+
+CREATE INDEX IF NOT EXISTS idx_products_name
+    ON agro_directo.products(name);
+
+CREATE INDEX IF NOT EXISTS idx_products_name_status
+    ON agro_directo.products(name, status_id);
+
+CREATE INDEX IF NOT EXISTS idx_products_producer_status
+    ON agro_directo.products(producer_user_id, status_id);
+
+CREATE INDEX IF NOT EXISTS idx_products_created_at
+    ON agro_directo.products(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_orders_buyer
+    ON agro_directo.orders(buyer_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_orders_status
+    ON agro_directo.orders(status_id);
+
+CREATE INDEX IF NOT EXISTS idx_orders_buyer_status
+    ON agro_directo.orders(buyer_user_id, status_id);
+
+CREATE INDEX IF NOT EXISTS idx_orders_created_at
+    ON agro_directo.orders(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_order_items_order
+    ON agro_directo.order_items(order_id);
+
+CREATE INDEX IF NOT EXISTS idx_order_items_producer
+    ON agro_directo.order_items(producer_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_shipments_order
+    ON agro_directo.shipments(order_id);
+
+CREATE INDEX IF NOT EXISTS idx_shipments_status
+    ON agro_directo.shipments(status_id);
+
+CREATE INDEX IF NOT EXISTS idx_shipments_producer
+    ON agro_directo.shipments(producer_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_shipments_buyer
+    ON agro_directo.shipments(buyer_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_user_read
+    ON agro_directo.notifications(user_id, is_read);
+
+CREATE INDEX IF NOT EXISTS idx_notifications_created_at
+    ON agro_directo.notifications(created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_verification_documents_user
+    ON agro_directo.verification_documents(user_id);
+
+CREATE INDEX IF NOT EXISTS idx_payment_receipts_payment
+    ON agro_directo.payment_receipts(payment_id);
+
+CREATE INDEX IF NOT EXISTS idx_market_reference_prices_name_date
+    ON agro_directo.market_reference_prices(product_name, observed_on DESC);
+
+CREATE INDEX IF NOT EXISTS idx_producer_profiles_geo_lat
+    ON agro_directo.producer_profiles(geo_latitude);
+
+CREATE INDEX IF NOT EXISTS idx_producer_profiles_geo_lon
+    ON agro_directo.producer_profiles(geo_longitude);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_actor
+    ON agro_directo.audit_log(actor_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_entity
+    ON agro_directo.audit_log(entity_name, entity_id);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_created_at
+    ON agro_directo.audit_log(created_at DESC);
+
+-- =========================================================
+-- TRIGGERS updated_at
+-- =========================================================
+DROP TRIGGER IF EXISTS trg_users_updated_at ON agro_directo.users;
+CREATE TRIGGER trg_users_updated_at
+BEFORE UPDATE ON agro_directo.users
+FOR EACH ROW
+EXECUTE FUNCTION agro_directo.set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_producer_profiles_updated_at ON agro_directo.producer_profiles;
+CREATE TRIGGER trg_producer_profiles_updated_at
+BEFORE UPDATE ON agro_directo.producer_profiles
+FOR EACH ROW
+EXECUTE FUNCTION agro_directo.set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_buyer_profiles_updated_at ON agro_directo.buyer_profiles;
+CREATE TRIGGER trg_buyer_profiles_updated_at
+BEFORE UPDATE ON agro_directo.buyer_profiles
+FOR EACH ROW
+EXECUTE FUNCTION agro_directo.set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_carrier_profiles_updated_at ON agro_directo.carrier_profiles;
+CREATE TRIGGER trg_carrier_profiles_updated_at
+BEFORE UPDATE ON agro_directo.carrier_profiles
+FOR EACH ROW
+EXECUTE FUNCTION agro_directo.set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_products_updated_at ON agro_directo.products;
+CREATE TRIGGER trg_products_updated_at
+BEFORE UPDATE ON agro_directo.products
+FOR EACH ROW
+EXECUTE FUNCTION agro_directo.set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_carts_updated_at ON agro_directo.carts;
+CREATE TRIGGER trg_carts_updated_at
+BEFORE UPDATE ON agro_directo.carts
+FOR EACH ROW
+EXECUTE FUNCTION agro_directo.set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_orders_updated_at ON agro_directo.orders;
+CREATE TRIGGER trg_orders_updated_at
+BEFORE UPDATE ON agro_directo.orders
+FOR EACH ROW
+EXECUTE FUNCTION agro_directo.set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_payments_updated_at ON agro_directo.payments;
+CREATE TRIGGER trg_payments_updated_at
+BEFORE UPDATE ON agro_directo.payments
+FOR EACH ROW
+EXECUTE FUNCTION agro_directo.set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_shipments_updated_at ON agro_directo.shipments;
+CREATE TRIGGER trg_shipments_updated_at
+BEFORE UPDATE ON agro_directo.shipments
+FOR EACH ROW
+EXECUTE FUNCTION agro_directo.set_updated_at();
+
+-- =========================================================
+-- DATOS SEMILLA: ROLES
+-- =========================================================
+INSERT INTO agro_directo.roles (code, name) VALUES
+    ('PRODUCER', 'Productor'),
+    ('BUYER', 'Comprador'),
+    ('CARRIER', 'Transportista'),
+    ('ADMIN', 'Administrador')
+ON CONFLICT (code) DO NOTHING;
+
+-- =========================================================
+-- DATOS SEMILLA: PERMISOS
+-- =========================================================
+INSERT INTO agro_directo.permissions (code, name, description) VALUES
+    ('AUTH_LOGIN', 'Iniciar sesión', 'Permite iniciar sesión en el sistema'),
+    ('AUTH_REFRESH_TOKEN', 'Renovar token', 'Permite renovar el token de acceso'),
+
+    ('USER_READ', 'Consultar usuarios', 'Permite consultar información de usuarios'),
+    ('USER_CREATE', 'Crear usuarios', 'Permite registrar nuevos usuarios'),
+    ('USER_UPDATE', 'Actualizar usuarios', 'Permite actualizar información de usuarios'),
+    ('USER_DISABLE', 'Deshabilitar usuarios', 'Permite deshabilitar usuarios'),
+
+    ('ROLE_READ', 'Consultar roles', 'Permite consultar roles'),
+    ('ROLE_ASSIGN', 'Asignar roles', 'Permite asignar roles a usuarios'),
+
+    ('PRODUCT_READ', 'Consultar productos', 'Permite consultar productos publicados'),
+    ('PRODUCT_CREATE', 'Crear productos', 'Permite crear publicaciones de productos'),
+    ('PRODUCT_UPDATE', 'Actualizar productos', 'Permite modificar publicaciones de productos'),
+    ('PRODUCT_DELETE', 'Eliminar productos', 'Permite eliminar o desactivar publicaciones de productos'),
+
+    ('CART_MANAGE', 'Gestionar carrito', 'Permite agregar, modificar y eliminar productos del carrito'),
+
+    ('ORDER_CREATE', 'Crear pedidos', 'Permite crear pedidos'),
+    ('ORDER_READ', 'Consultar pedidos', 'Permite consultar pedidos'),
+    ('ORDER_UPDATE_STATUS', 'Actualizar estado de pedido', 'Permite cambiar el estado de un pedido'),
+    ('ORDER_CONFIRM_ITEM', 'Confirmar producto de pedido', 'Permite confirmar o rechazar ítems de pedidos'),
+
+    ('PAYMENT_CREATE', 'Crear pagos', 'Permite generar pagos'),
+    ('PAYMENT_READ', 'Consultar pagos', 'Permite consultar pagos'),
+    ('PAYMENT_VERIFY', 'Verificar pagos', 'Permite aprobar o rechazar comprobantes de pago'),
+
+    ('SHIPMENT_READ', 'Consultar envíos', 'Permite consultar envíos'),
+    ('SHIPMENT_APPLY', 'Postular a envío', 'Permite a transportistas postular a envíos'),
+    ('SHIPMENT_ASSIGN', 'Asignar envío', 'Permite asignar transportista a un envío'),
+    ('SHIPMENT_UPDATE_STATUS', 'Actualizar estado de envío', 'Permite cambiar el estado logístico de un envío'),
+    ('SHIPMENT_CONFIRM_DELIVERY', 'Confirmar entrega', 'Permite confirmar la recepción de un envío'),
+
+    ('DOCUMENT_UPLOAD', 'Subir documentos', 'Permite subir documentos de verificación'),
+    ('DOCUMENT_REVIEW', 'Revisar documentos', 'Permite aprobar o rechazar documentos de verificación'),
+
+    ('RATING_CREATE', 'Crear calificación', 'Permite registrar calificaciones'),
+    ('RATING_READ', 'Consultar calificaciones', 'Permite consultar calificaciones'),
+
+    ('NOTIFICATION_READ', 'Consultar notificaciones', 'Permite consultar notificaciones'),
+    ('NOTIFICATION_UPDATE', 'Actualizar notificaciones', 'Permite marcar notificaciones como leídas'),
+
+    ('AUDIT_READ', 'Consultar auditoría', 'Permite consultar registros de auditoría'),
+
+    ('ADMIN_DASHBOARD', 'Panel administrativo', 'Permite acceder al panel administrativo')
+ON CONFLICT (code) DO NOTHING;
+
+-- =========================================================
+-- DATOS SEMILLA: ESTADOS Y CATÁLOGOS
+-- =========================================================
+INSERT INTO agro_directo.user_statuses (code, name) VALUES
+    ('REGISTERED', 'Registrado'),
+    ('PENDING_VERIFICATION', 'Pendiente de Verificación'),
+    ('VERIFIED', 'Verificado'),
+    ('REJECTED', 'Rechazado'),
+    ('INCOMPLETE', 'Incompleto'),
+    ('SUSPENDED', 'Suspendido'),
+    ('LOCKED', 'Bloqueado')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO agro_directo.document_types (code, name) VALUES
+    ('CI', 'Carnet de Identidad'),
+    ('PRODUCER_REGISTRY', 'Registro de Productor'),
+    ('COMMUNITY_CERTIFICATE', 'Certificado Comunitario'),
+    ('DRIVER_LICENSE', 'Licencia de Conducir'),
+    ('SOAT', 'SOAT'),
+    ('VEHICLE_REGISTRY', 'Registro de Vehículo')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO agro_directo.product_units (code, name) VALUES
+    ('QUINTAL', 'Quintal'),
+    ('ARROBA', 'Arroba'),
+    ('KG', 'Kilogramo'),
+    ('UNIT', 'Unidad')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO agro_directo.product_statuses (code, name) VALUES
+    ('DRAFT', 'Borrador'),
+    ('PUBLISHED', 'Publicado'),
+    ('RESERVED', 'Reservado'),
+    ('SOLD_OUT', 'Agotado'),
+    ('INACTIVE', 'Inactivo')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO agro_directo.order_statuses (code, name) VALUES
+    ('CREATED', 'Creado'),
+    ('PENDING_CONFIRMATION', 'Pendiente de Confirmación'),
+    ('CONFIRMED', 'Confirmado'),
+    ('PARTIALLY_CONFIRMED', 'Parcialmente Confirmado'),
+    ('PAID', 'Pagado'),
+    ('IN_TRANSIT', 'En Tránsito'),
+    ('DELIVERED', 'Entregado'),
+    ('CANCELLED', 'Cancelado')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO agro_directo.payment_statuses (code, name) VALUES
+    ('PENDING', 'Pendiente'),
+    ('QR_GENERATED', 'QR Generado'),
+    ('RECEIPT_UPLOADED', 'Comprobante Subido'),
+    ('VERIFIED', 'Verificado'),
+    ('REJECTED', 'Rechazado')
+ON CONFLICT (code) DO NOTHING;
+
+INSERT INTO agro_directo.shipment_statuses (code, name) VALUES
+    ('OPEN', 'Abierto'),
+    ('APPLIED', 'Postulado'),
+    ('ASSIGNED', 'Asignado'),
+    ('PICKED_UP', 'Recogido'),
+    ('IN_TRANSIT', 'En Tránsito'),
+    ('DELIVERED', 'Entregado'),
+    ('CLOSED', 'Cerrado'),
+    ('CANCELLED', 'Cancelado')
+ON CONFLICT (code) DO NOTHING;
+
+-- =========================================================
+-- DATOS SEMILLA: PERMISOS POR ROL
+-- =========================================================
+
+-- ADMIN: todos los permisos
+INSERT INTO agro_directo.role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM agro_directo.roles r
+CROSS JOIN agro_directo.permissions p
+WHERE r.code = 'ADMIN'
+ON CONFLICT (role_id, permission_id) DO NOTHING;
+
+-- PRODUCER
+INSERT INTO agro_directo.role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM agro_directo.roles r
+JOIN agro_directo.permissions p ON p.code IN (
+    'AUTH_LOGIN',
+    'AUTH_REFRESH_TOKEN',
+    'USER_READ',
+    'USER_UPDATE',
+    'PRODUCT_READ',
+    'PRODUCT_CREATE',
+    'PRODUCT_UPDATE',
+    'PRODUCT_DELETE',
+    'ORDER_READ',
+    'ORDER_CONFIRM_ITEM',
+    'SHIPMENT_READ',
+    'SHIPMENT_UPDATE_STATUS',
+    'DOCUMENT_UPLOAD',
+    'RATING_READ',
+    'NOTIFICATION_READ',
+    'NOTIFICATION_UPDATE'
+)
+WHERE r.code = 'PRODUCER'
+ON CONFLICT (role_id, permission_id) DO NOTHING;
+
+-- BUYER
+INSERT INTO agro_directo.role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM agro_directo.roles r
+JOIN agro_directo.permissions p ON p.code IN (
+    'AUTH_LOGIN',
+    'AUTH_REFRESH_TOKEN',
+    'USER_READ',
+    'USER_UPDATE',
+    'PRODUCT_READ',
+    'CART_MANAGE',
+    'ORDER_CREATE',
+    'ORDER_READ',
+    'PAYMENT_CREATE',
+    'PAYMENT_READ',
+    'SHIPMENT_READ',
+    'SHIPMENT_CONFIRM_DELIVERY',
+    'DOCUMENT_UPLOAD',
+    'RATING_CREATE',
+    'RATING_READ',
+    'NOTIFICATION_READ',
+    'NOTIFICATION_UPDATE'
+)
+WHERE r.code = 'BUYER'
+ON CONFLICT (role_id, permission_id) DO NOTHING;
+
+-- CARRIER
+INSERT INTO agro_directo.role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM agro_directo.roles r
+JOIN agro_directo.permissions p ON p.code IN (
+    'AUTH_LOGIN',
+    'AUTH_REFRESH_TOKEN',
+    'USER_READ',
+    'USER_UPDATE',
+    'SHIPMENT_READ',
+    'SHIPMENT_APPLY',
+    'SHIPMENT_UPDATE_STATUS',
+    'DOCUMENT_UPLOAD',
+    'NOTIFICATION_READ',
+    'NOTIFICATION_UPDATE'
+)
+WHERE r.code = 'CARRIER'
+ON CONFLICT (role_id, permission_id) DO NOTHING;
+
+COMMIT;
