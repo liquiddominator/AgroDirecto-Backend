@@ -15,9 +15,9 @@ INSERT INTO agro_directo.users (
 )
 SELECT
     'Administrador AgroDirecto',
-    'admin@agrodirecto.local',
+    'admin@gmail.com',
     '$2a$10$i.wN2dp9bFhVJbiTwkVskuIl.EP9AEGvd9RBlUR0D5ba78vFT0PFe',
-    '00000000',
+    '77618892',
     us.id,
     TRUE,
     TRUE,
@@ -48,7 +48,7 @@ SET is_primary = FALSE
 WHERE user_id = (
     SELECT id
     FROM agro_directo.users
-    WHERE email = 'admin@agrodirecto.local'
+    WHERE email = 'admin@gmail.com'
 );
 
 INSERT INTO agro_directo.user_roles (
@@ -62,6 +62,6 @@ SELECT
     TRUE
 FROM agro_directo.users u
 JOIN agro_directo.roles r ON r.code = 'ADMIN'
-WHERE u.email = 'admin@agrodirecto.local'
+WHERE u.email = 'admin@gmail.com'
 ON CONFLICT (user_id, role_id) DO UPDATE SET
     is_primary = TRUE;

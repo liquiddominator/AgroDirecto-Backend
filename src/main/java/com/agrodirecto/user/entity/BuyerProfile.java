@@ -57,12 +57,28 @@ public class BuyerProfile {
         this.userId = userId;
     }
 
+    public Long getUserId() {
+        return userId;
+    }
+
+    public String getBuyerType() {
+        return buyerType;
+    }
+
     public void setBuyerType(String buyerType) {
         this.buyerType = buyerType;
     }
 
+    public String getBusinessName() {
+        return businessName;
+    }
+
     public void setBusinessName(String businessName) {
         this.businessName = businessName;
+    }
+
+    public String getCityOrPurchaseZone() {
+        return cityOrPurchaseZone;
     }
 
     public void setCityOrPurchaseZone(String cityOrPurchaseZone) {

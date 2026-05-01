@@ -64,20 +64,44 @@ public class CarrierProfile {
         this.userId = userId;
     }
 
+    public Long getUserId() {
+        return userId;
+    }
+
+    public String getTransportType() {
+        return transportType;
+    }
+
     public void setTransportType(String transportType) {
         this.transportType = transportType;
+    }
+
+    public BigDecimal getLoadCapacityKg() {
+        return loadCapacityKg;
     }
 
     public void setLoadCapacityKg(BigDecimal loadCapacityKg) {
         this.loadCapacityKg = loadCapacityKg;
     }
 
+    public String getOperationZone() {
+        return operationZone;
+    }
+
     public void setOperationZone(String operationZone) {
         this.operationZone = operationZone;
     }
 
+    public String getDriverLicenseNumber() {
+        return driverLicenseNumber;
+    }
+
     public void setDriverLicenseNumber(String driverLicenseNumber) {
         this.driverLicenseNumber = driverLicenseNumber;
+    }
+
+    public String getVehiclePlate() {
+        return vehiclePlate;
     }
 
     public void setVehiclePlate(String vehiclePlate) {

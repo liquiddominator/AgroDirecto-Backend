@@ -76,36 +76,76 @@ public class ProducerProfile {
         this.userId = userId;
     }
 
+    public Long getUserId() {
+        return userId;
+    }
+
+    public String getProducerType() {
+        return producerType;
+    }
+
     public void setProducerType(String producerType) {
         this.producerType = producerType;
+    }
+
+    public String getFarmName() {
+        return farmName;
     }
 
     public void setFarmName(String farmName) {
         this.farmName = farmName;
     }
 
+    public String getMunicipality() {
+        return municipality;
+    }
+
     public void setMunicipality(String municipality) {
         this.municipality = municipality;
+    }
+
+    public String getProvince() {
+        return province;
     }
 
     public void setProvince(String province) {
         this.province = province;
     }
 
+    public String getDepartment() {
+        return department;
+    }
+
     public void setDepartment(String department) {
         this.department = department;
+    }
+
+    public Integer getExperienceYears() {
+        return experienceYears;
     }
 
     public void setExperienceYears(Integer experienceYears) {
         this.experienceYears = experienceYears;
     }
 
+    public BigDecimal getGeoLatitude() {
+        return geoLatitude;
+    }
+
     public void setGeoLatitude(BigDecimal geoLatitude) {
         this.geoLatitude = geoLatitude;
     }
 
+    public BigDecimal getGeoLongitude() {
+        return geoLongitude;
+    }
+
     public void setGeoLongitude(BigDecimal geoLongitude) {
         this.geoLongitude = geoLongitude;
+    }
+
+    public Boolean getGeolocationCompleted() {
+        return geolocationCompleted;
     }
 
     public void setGeolocationCompleted(Boolean geolocationCompleted) {
